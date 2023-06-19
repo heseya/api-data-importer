@@ -1,193 +1,207 @@
-mod interfaces;
-
-use std::str::FromStr;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
+use reqwest::{Body, Client};
+use tokio::sync::Mutex;
 
-use crate::heseya::interfaces::HeseyaLoginResponse;
+pub use self::interfaces::{ApiTokens, Request, RequestMethod, Response};
 
-pub use self::interfaces::{ApiTokens, LoginDto, Request};
+mod interfaces;
 
-pub struct Sdk {
-    api_url: String,
-    max_retries: usize,
-    client: reqwest::Client,
-    tokens: Option<ApiTokens>,
+pub fn make_client(user_agent: &str) -> Client {
+    #[allow(clippy::expect_used)]
+    reqwest::Client::builder()
+        .user_agent(user_agent)
+        .build()
+        .expect("Failed to create Heysya SDK client ")
 }
 
-impl Sdk {
-    pub fn new(api_url: &str, user_agent: &str) -> Self {
-        #[allow(clippy::expect_used)]
-        let client = reqwest::Client::builder()
-            .user_agent(user_agent)
-            .build()
-            .expect("Failed to create Heysya SDK client ");
-
-        Self {
-            api_url: api_url.to_string(),
-            client,
-            tokens: None,
-            max_retries: 3,
-        }
-    }
-
-    pub fn set_tokens(&mut self, tokens: ApiTokens) {
-        self.tokens = Some(tokens);
-    }
-}
-
-pub async fn api_login(auth: &LoginDto, heseya_sdk: &Sdk) -> anyhow::Result<ApiTokens> {
-    let login_url = format!("{}/login", heseya_sdk.api_url);
-
-    let response = heseya_sdk
-        .client
-        .post(login_url)
-        .json(auth)
-        .send()
-        .await
-        .context("Failed to make login request")?;
-
-    // let HeseyaLoginResponse { data: tokens } = response
-    //     .json()
-    //     .await
-    //     .with_context(|| format!("Failed to parse login response\n{}", ))?;
-
-    let body = response
-        .text()
-        .await
-        .context("Failed to read login response body")?;
-
-    let json = serde_json::Value::from_str(&body)
-        .with_context(|| format!("Failed to parse login response\n{body:}"))?;
-
-    let tokens = serde_json::from_value::<HeseyaLoginResponse>(json.clone())
-        .with_context(|| format!("Failed to parse login response\n{json:#}"))?
-        .data;
-
-    Ok(tokens)
-}
-
-pub async fn make_api_request(
-    api_request: &Request,
-    heseya_sdk: &mut Sdk,
+pub async fn make_request_retry_with_auth(
+    api_url: &str,
+    request: &Request,
+    client: &Client,
+    auth: Arc<Mutex<ApiTokens>>,
 ) -> anyhow::Result<reqwest::Response> {
-    let method = &api_request.method;
-    let url = format!("{}{}", heseya_sdk.api_url, api_request.url);
+    let (tokens, should_update_auth) = match &request.auth {
+        Some(login_dto) => {
+            let tokens = get_tokens(api_url, client, &login_dto.email, &login_dto.password).await?;
+            (tokens, false)
+        }
+        None => {
+            let tokens = auth.lock().await.clone();
+            (tokens, true)
+        }
+    };
 
-    let mut tokens = heseya_sdk.tokens.clone();
+    let response = make_request_retry(api_url, request, client, Some(&tokens.token)).await?;
 
-    if let Some(auth) = &api_request.auth {
-        let result = api_login(auth, heseya_sdk)
-            .await
-            .context("Failed to login")?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let new_token = refresh_tokens(api_url, client, tokens).await?;
 
-        tokens = Some(result);
-    }
-
-    let mut request_builder = heseya_sdk
-        .client
-        .request(method.clone().into(), url.as_str())
-        .json(&api_request.body);
-
-    if let Some(tokens) = tokens.clone() {
-        request_builder = request_builder.bearer_auth(tokens.token);
-    }
-
-    let request = request_builder.build().context("Failed to build request")?;
-
-    let mut response = retry_request(&heseya_sdk.client, &request, heseya_sdk.max_retries)
-        .await
-        .context("Failed to make request")?;
-
-    if let Some(tokens) = tokens {
-        if response.status() != reqwest::StatusCode::UNAUTHORIZED {
-            return Ok(response);
+        if should_update_auth {
+            let mut auth = auth.lock().await;
+            *auth = new_token.clone();
         }
 
-        println!("Token expired, refreshing token");
-        let tokens = refresh_token(heseya_sdk, tokens)
-            .await
-            .context("Failed to refresh token")?;
+        let response = make_request_retry(api_url, request, client, Some(&new_token.token)).await?;
 
-        let request = heseya_sdk
-            .client
-            .request(method.clone().into(), url.as_str())
-            .json(&api_request.body)
-            .bearer_auth(&tokens.token)
-            .build()
-            .context("Failed to build request after refreshing token")?;
-
-        response = retry_request(&heseya_sdk.client, &request, heseya_sdk.max_retries)
-            .await
-            .context("Failed to make request after refreshing token")?;
+        return Ok(response);
     }
 
     Ok(response)
 }
 
-async fn refresh_token(heseya_sdk: &mut Sdk, tokens: ApiTokens) -> anyhow::Result<ApiTokens> {
-    let mut does_sdk_use_same_token = false;
-
-    if let Some(sdk_tokens) = &heseya_sdk.tokens {
-        does_sdk_use_same_token = sdk_tokens.refresh_token == tokens.refresh_token;
-    }
-
-    let body = serde_json::json!({
-        "refresh_token": tokens.refresh_token,
-    });
-
-    let request = heseya_sdk
-        .client
-        .post(format!(
-            "{api_url}/auth/refresh",
-            api_url = heseya_sdk.api_url
-        ))
-        .json(&body)
-        .build()
-        .context("Failed to build refresh token request")?;
-
-    let response = retry_request(&heseya_sdk.client, &request, heseya_sdk.max_retries)
-        .await
-        .context("Failed to execute refresh token request")?;
-
-    let tokens = response
-        .json::<ApiTokens>()
-        .await
-        .context("Failed to parse token response")?;
-
-    if does_sdk_use_same_token {
-        heseya_sdk.set_tokens(tokens.clone());
-    }
-
-    Ok(tokens)
-}
-
-async fn retry_request(
-    client: &reqwest::Client,
-    request: &reqwest::Request,
-    max_retries: usize,
+pub async fn make_request_retry(
+    api_url: &str,
+    request: &Request,
+    client: &Client,
+    token: Option<&str>,
 ) -> anyhow::Result<reqwest::Response> {
     let retry_delay_seconds = 3;
     let mut retry_count = 0;
 
     loop {
-        let request_attempt = request
-            .try_clone()
-            .ok_or_else(|| anyhow::anyhow!("Failed to clone request for retrying request"))?;
+        let response = make_request(api_url, request, client, token).await;
 
-        let response = client.execute(request_attempt).await;
+        match response {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                if retry_count >= 3 {
+                    return Err(err);
+                }
 
-        let is_response_ok = response
-            .as_ref()
-            .map(|response| !response.status().is_server_error())
-            .unwrap_or(false);
-
-        if is_response_ok || retry_count >= max_retries {
-            return response.context("Failed to execute request");
+                retry_count += 1;
+                tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_seconds)).await;
+            }
         }
-
-        tokio::time::sleep(std::time::Duration::from_secs(retry_delay_seconds)).await;
-        retry_count += 1;
-        println!("Retrying request: {retry_count}");
     }
+}
+
+pub async fn make_request(
+    api_url: &str,
+    request: &Request,
+    client: &Client,
+    token: Option<&str>,
+) -> anyhow::Result<reqwest::Response> {
+    let full_url = format!("{}{}", api_url, request.url);
+    let method = request.method.clone();
+
+    let mut builder = client.request(method.into(), full_url);
+
+    if let Some(files) = &request.files {
+        let json = serde_json::to_value(&request.body).context("Failed to serialize json")?;
+        let form = make_request_body_files(files, &json, client).await?;
+        builder = builder.multipart(form);
+    } else {
+        builder = builder.json(&request.body);
+    }
+
+    if let Some(token) = token {
+        builder = builder.bearer_auth(token);
+    }
+
+    let response = builder.send().await.context("Failed to make request")?;
+
+    Ok(response)
+}
+
+async fn make_request_body_files(
+    files: &HashMap<String, String>,
+    json: &serde_json::Value,
+    client: &Client,
+) -> anyhow::Result<reqwest::multipart::Form> {
+    let mut form = reqwest::multipart::Form::new();
+
+    for (name, url) in files {
+        let bytes = download_file(url, client).await?;
+        let body = Body::from(bytes);
+
+        // naive implementation
+        let file_name = url.split('/').last().context("Failed to get file name")?;
+
+        let file = reqwest::multipart::Part::stream(body).file_name(file_name.to_string());
+        form = form.part(name.to_string(), file);
+    }
+
+    let json = serde_json::to_value(json).context("Failed to serialize json")?;
+
+    for (name, value) in json.as_object().context("Failed to get json object")? {
+        match value {
+            serde_json::Value::String(value) => {
+                form = form.text(name.to_string(), value.to_string());
+            }
+            serde_json::Value::Number(value) => {
+                form = form.text(name.to_string(), value.to_string());
+            }
+            serde_json::Value::Bool(value) => {
+                form = form.text(name.to_string(), value.to_string());
+            }
+            serde_json::Value::Null => (),
+            _ => {
+                return Err(anyhow::anyhow!("Unsupported json value type"));
+            }
+        }
+    }
+
+    Ok(form)
+}
+
+async fn download_file(url: &str, client: &Client) -> anyhow::Result<Vec<u8>> {
+    let bytes = client
+        .get(url)
+        .send()
+        .await
+        .context("Failed to download file")?
+        .bytes()
+        .await
+        .context("Failed to read file bytes")?;
+
+    Ok(bytes.to_vec())
+}
+
+async fn refresh_tokens(
+    api_url: &str,
+    client: &Client,
+    auth: ApiTokens,
+) -> anyhow::Result<ApiTokens> {
+    let request = Request {
+        url: "/auth/refresh".to_string(),
+        method: RequestMethod::Post,
+        body: Some(serde_json::json!({ "refresh_token": auth.refresh_token })),
+        files: None,
+        auth: None,
+    };
+
+    let response = make_request_retry(api_url, &request, client, None).await?;
+
+    let response = response
+        .json::<Response<ApiTokens>>()
+        .await
+        .context("Failed to parse refresh token response")?;
+
+    Ok(response.data)
+}
+
+pub async fn get_tokens(
+    api_url: &str,
+    client: &Client,
+    email: &str,
+    password: &str,
+) -> anyhow::Result<ApiTokens> {
+    let request = Request {
+        url: "/login".to_string(),
+        method: RequestMethod::Post,
+        body: Some(serde_json::json!({ "email": email, "password": password })),
+        files: None,
+        auth: None,
+    };
+
+    let response = make_request_retry(api_url, &request, client, None).await?;
+
+    let response = response
+        .json::<Response<ApiTokens>>()
+        .await
+        .context("Failed to parse login response")?;
+
+    Ok(response.data)
 }

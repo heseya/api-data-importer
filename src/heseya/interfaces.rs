@@ -1,9 +1,4 @@
-#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-pub struct ApiTokens {
-    pub token: String,
-    pub identity_token: String,
-    pub refresh_token: String,
-}
+use std::collections::HashMap;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub struct LoginDto {
@@ -12,13 +7,15 @@ pub struct LoginDto {
     pub code: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct HeseyaLoginResponse {
-    pub data: ApiTokens,
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+pub struct ApiTokens {
+    pub token: String,
+    pub identity_token: String,
+    pub refresh_token: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
-pub enum HeseyaRequestMethod {
+pub enum RequestMethod {
     #[serde(alias = "GET", alias = "get")]
     Get,
     #[serde(alias = "POST", alias = "post")]
@@ -31,22 +28,28 @@ pub enum HeseyaRequestMethod {
     Delete,
 }
 
-impl From<HeseyaRequestMethod> for reqwest::Method {
-    fn from(method: HeseyaRequestMethod) -> Self {
+impl From<RequestMethod> for reqwest::Method {
+    fn from(method: RequestMethod) -> Self {
         match method {
-            HeseyaRequestMethod::Get => Self::GET,
-            HeseyaRequestMethod::Post => Self::POST,
-            HeseyaRequestMethod::Put => Self::PUT,
-            HeseyaRequestMethod::Patch => Self::PATCH,
-            HeseyaRequestMethod::Delete => Self::DELETE,
+            RequestMethod::Get => Self::GET,
+            RequestMethod::Post => Self::POST,
+            RequestMethod::Put => Self::PUT,
+            RequestMethod::Patch => Self::PATCH,
+            RequestMethod::Delete => Self::DELETE,
         }
     }
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub struct Request {
-    pub method: HeseyaRequestMethod,
+    pub method: RequestMethod,
     pub url: String,
     pub body: Option<serde_json::Value>,
     pub auth: Option<LoginDto>,
+    pub files: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+pub struct Response<T> {
+    pub data: T,
 }

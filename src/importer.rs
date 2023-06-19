@@ -1,7 +1,13 @@
-use anyhow::Context;
-use tokio::fs::DirEntry;
+use std::sync::Arc;
 
-use crate::heseya::{self, Request};
+use anyhow::Context;
+use reqwest::{Client, Response};
+use tokio::{
+    fs::DirEntry,
+    sync::{Mutex, Semaphore},
+};
+
+use crate::heseya::{self, ApiTokens, Request};
 
 pub async fn get_request_files() -> anyhow::Result<Vec<DirEntry>> {
     let mut directory = tokio::fs::read_dir("./requests")
@@ -15,7 +21,10 @@ pub async fn get_request_files() -> anyhow::Result<Vec<DirEntry>> {
         .await
         .context("Failed to read next entry")?
     {
-        if file.file_type().await?.is_file() {
+        let is_file = file.file_type().await?.is_file();
+        let is_json = file.path().extension().map_or(false, |ext| ext == "json");
+
+        if is_file && is_json {
             file_list.push(file);
         }
     }
@@ -29,7 +38,13 @@ type FileIdentifier = (usize, String);
 type RequestIdentifier = (usize, Request);
 type IncompleteFile = (FileIdentifier, Vec<RequestIdentifier>);
 
-pub async fn import_request_files(file_list: Vec<DirEntry>, heseya_sdk: &mut heseya::Sdk) {
+pub async fn import_request_files(
+    file_list: Vec<DirEntry>,
+    api_url: &str,
+    client: &Client,
+    auth: Arc<Mutex<ApiTokens>>,
+) {
+    let api_url: Arc<str> = Arc::from(api_url);
     let mut failed_files: Vec<FileIdentifier> = Vec::new();
     let mut incomplete_files: Vec<IncompleteFile> = Vec::new();
 
@@ -42,7 +57,7 @@ pub async fn import_request_files(file_list: Vec<DirEntry>, heseya_sdk: &mut hes
             file_list.len(),
             file_name,
         );
-        let result = import_request_file(file_info, heseya_sdk).await;
+        let result = import_request_file(file_info, api_url.clone(), client, auth.clone()).await;
 
         match result {
             Ok(result) => {
@@ -98,7 +113,9 @@ pub async fn import_request_files(file_list: Vec<DirEntry>, heseya_sdk: &mut hes
 
 async fn import_request_file(
     file_info: &DirEntry,
-    heseya_sdk: &mut heseya::Sdk,
+    api_url: Arc<str>,
+    client: &Client,
+    auth: Arc<Mutex<ApiTokens>>,
 ) -> anyhow::Result<Vec<(usize, Request)>> {
     let path = file_info.path();
 
@@ -109,58 +126,58 @@ async fn import_request_file(
     let requests = serde_json::from_str::<Vec<heseya::Request>>(&file)
         .with_context(|| format!("Failed to parse file: {}", path.display()))?;
 
-    let mut failed_requests: Vec<RequestIdentifier> = Vec::new();
+    let mut handles = Vec::new();
+    let semaphore = Arc::new(Semaphore::new(100));
+    let failed_requests: Arc<Mutex<Vec<RequestIdentifier>>> = Arc::new(Mutex::new(Vec::new()));
 
     for (index, request) in requests.iter().enumerate() {
-        let method = request.method.clone();
-        let url = request.url.clone();
-        let result = heseya::make_api_request(request, heseya_sdk).await;
+        let api_url = api_url.clone();
+        let client = client.clone();
+        let request = request.clone();
+        let auth = auth.clone();
+        let length = requests.len();
+        let failed_requests = failed_requests.clone();
 
-        match result {
-            Ok(response) => {
-                let is_success = response.status().is_success();
+        let permit = semaphore.clone().acquire_owned().await;
 
-                println!(
-                    "[Request] [{}/{}] [{result_string}] [{method:?}] {url}: {status}",
-                    index + 1,
-                    requests.len(),
-                    result_string = if is_success { "OK" } else { "FAIL" },
-                    status = response.status()
-                );
+        let handle = tokio::spawn(async move {
+            let result =
+                heseya::make_request_retry_with_auth(&api_url, &request, &client, auth.clone())
+                    .await;
 
-                if !is_success {
-                    failed_requests.push((index, request.clone()));
-
-                    let response_body = response.text().await;
-
-                    match response_body {
-                        Ok(response_body) => {
-                            let json = serde_json::from_str::<serde_json::Value>(&response_body);
-
-                            json.map_or_else(
-                                |_| {
-                                    println!("{response_body:}");
-                                },
-                                |json| {
-                                    println!("{json}");
-                                },
-                            );
-                        }
-                        Err(err) => println!("Failed to read response body: {err:?}"),
+            match result {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        failed_requests.lock().await.push((index, request.clone()));
                     }
+
+                    print_response(response, &request, index, length).await;
+                }
+                Err(err) => {
+                    failed_requests.lock().await.push((index, request.clone()));
+
+                    println!(
+                        "[Request] [{}/{}] [FAIL] [{method:?}] {url}: {err:?}",
+                        index + 1,
+                        length,
+                        method = request.method,
+                        url = request.url,
+                    );
                 }
             }
-            Err(err) => {
-                failed_requests.push((index, request.clone()));
 
-                println!(
-                    "[Request] [{}/{}] [FAIL] [{method:?}] {url}: {err:?}",
-                    index + 1,
-                    requests.len(),
-                );
-            }
-        }
+            drop(permit);
+        });
+
+        handles.push(handle);
     }
+
+    for handle in handles {
+        handle.await?;
+    }
+
+    let mut failed_requests = failed_requests.lock().await.clone();
+    failed_requests.sort_by_key(|(index, _)| *index);
 
     if !failed_requests.is_empty() {
         println!("Failed to import the following requests:");
@@ -176,4 +193,38 @@ async fn import_request_file(
     }
 
     Ok(failed_requests)
+}
+
+async fn print_response(response: Response, request: &Request, index: usize, length: usize) {
+    let is_success = response.status().is_success();
+
+    println!(
+        "[Request] [{}/{}] [{result_string}] [{method:?}] {url}: {status}",
+        index + 1,
+        length,
+        result_string = if is_success { "OK" } else { "FAIL" },
+        method = request.method,
+        url = request.url,
+        status = response.status()
+    );
+
+    if !is_success {
+        let response_body = response.text().await;
+
+        match response_body {
+            Ok(response_body) => {
+                let json = serde_json::from_str::<serde_json::Value>(&response_body);
+
+                json.map_or_else(
+                    |_| {
+                        println!("{response_body:}");
+                    },
+                    |json| {
+                        println!("{json}");
+                    },
+                );
+            }
+            Err(err) => println!("Failed to read response body: {err:?}"),
+        }
+    }
 }

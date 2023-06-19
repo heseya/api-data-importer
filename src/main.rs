@@ -9,8 +9,11 @@
 mod heseya;
 mod importer;
 
+use std::sync::Arc;
+
 use anyhow::Context;
-use heseya::{LoginDto, Sdk};
+use heseya::{get_tokens, make_client};
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,22 +22,14 @@ async fn main() -> anyhow::Result<()> {
     let password = dotenvy::var("API_PASSWORD").context("Failed to get api password")?;
     let api_url = dotenvy::var("API_URL").context("Failed to get api url")?;
 
-    let auth = LoginDto {
-        email,
-        password,
-        code: None,
-    };
-
-    let mut heseya_sdk = Sdk::new(&api_url, "HeseyaImporter/0.1");
-
-    let tokens = heseya::api_login(&auth, &heseya_sdk).await?;
-
-    heseya_sdk.set_tokens(tokens);
+    let client = make_client("HeseyaImporter/0.1");
+    let tokens = get_tokens(&api_url, &client, &email, &password).await?;
+    let auth = Arc::new(Mutex::new(tokens));
 
     let file_list = importer::get_request_files()
         .await
         .context("Failed to get request files")?;
-    importer::import_request_files(file_list, &mut heseya_sdk).await;
+    importer::import_request_files(file_list, &api_url, &client, auth).await;
 
     Ok(())
 }
