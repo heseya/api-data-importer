@@ -57,7 +57,8 @@ pub async fn make_request_retry(
     client: &Client,
     token: Option<&str>,
 ) -> anyhow::Result<reqwest::Response> {
-    let retry_delay_seconds = 3;
+    const ADDITIONAL_SECONDS_PER_RETRY: u64 = 3;
+    const MAX_RETRY_COUNT: usize = 5;
     let mut retry_count = 0;
 
     loop {
@@ -66,12 +67,15 @@ pub async fn make_request_retry(
         match response {
             Ok(response) => return Ok(response),
             Err(err) => {
-                if retry_count >= 3 {
+                if retry_count >= MAX_RETRY_COUNT {
                     return Err(err);
                 }
 
                 retry_count += 1;
-                tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_seconds)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    ADDITIONAL_SECONDS_PER_RETRY * retry_count as u64,
+                ))
+                .await;
             }
         }
     }
