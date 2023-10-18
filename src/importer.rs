@@ -43,6 +43,7 @@ pub async fn import_request_files(
     api_url: &str,
     client: &Client,
     auth: Arc<Mutex<ApiTokens>>,
+    semaphore_permits: usize,
 ) {
     let api_url: Arc<str> = Arc::from(api_url);
     let mut failed_files: Vec<FileIdentifier> = Vec::new();
@@ -57,7 +58,7 @@ pub async fn import_request_files(
             file_list.len(),
             file_name,
         );
-        let result = import_request_file(file_info, api_url.clone(), client, auth.clone()).await;
+        let result = import_request_file(file_info, api_url.clone(), client, auth.clone(), semaphore_permits).await;
 
         match result {
             Ok(result) => {
@@ -116,6 +117,7 @@ async fn import_request_file(
     api_url: Arc<str>,
     client: &Client,
     auth: Arc<Mutex<ApiTokens>>,
+    mut semaphore_permits: usize,
 ) -> anyhow::Result<Vec<(usize, Request)>> {
     let path = file_info.path();
 
@@ -126,8 +128,12 @@ async fn import_request_file(
     let requests = serde_json::from_str::<Vec<heseya::Request>>(&file)
         .with_context(|| format!("Failed to parse file: {}", path.display()))?;
 
+    if path.display().to_string().ends_with("synchronic.json") {
+       semaphore_permits = 1;
+    }
+
     let mut handles = Vec::new();
-    let semaphore = Arc::new(Semaphore::new(100));
+    let semaphore = Arc::new(Semaphore::new(semaphore_permits));
     let failed_requests: Arc<Mutex<Vec<RequestIdentifier>>> = Arc::new(Mutex::new(Vec::new()));
 
     for (index, request) in requests.iter().enumerate() {

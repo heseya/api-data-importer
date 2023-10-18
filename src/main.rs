@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
     let email = dotenvy::var("API_EMAIL").context("Failed to get api email")?;
     let password = dotenvy::var("API_PASSWORD").context("Failed to get api password")?;
     let api_url = dotenvy::var("API_URL").context("Failed to get api url")?;
+    let semaphore_permits = dotenvy::var("SEMAPHORE_PERMITS").context("Failed to get semaphote permits")?;
 
     let client = make_client("HeseyaImporter/0.1");
     let tokens = get_tokens(&api_url, &client, &email, &password).await?;
@@ -29,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let file_list = importer::get_request_files()
         .await
         .context("Failed to get request files")?;
-    importer::import_request_files(file_list, &api_url, &client, auth).await;
+    importer::import_request_files(file_list, &api_url, &client, auth, semaphore_permits.parse().unwrap()).await;
 
     Ok(())
 }
