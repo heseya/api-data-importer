@@ -36,11 +36,20 @@ pub async fn make_request_retry_with_auth(
     let response = make_request_retry(api_url, request, client, Some(&tokens.token)).await?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let new_token = refresh_tokens(api_url, client, tokens).await?;
+        let new_token;
 
         if should_update_auth {
             let mut auth = auth.lock().await;
-            *auth = new_token.clone();
+
+            if tokens.refresh_token == auth.refresh_token {
+                new_token = refresh_tokens(api_url, client, auth.clone()).await?;
+
+                *auth = new_token.clone();
+            } else {
+                new_token = auth.clone();
+            }
+        } else {
+            new_token = refresh_tokens(api_url, client, tokens).await?;
         }
 
         let response = make_request_retry(api_url, request, client, Some(&new_token.token)).await?;
@@ -176,12 +185,15 @@ async fn refresh_tokens(
         auth: None,
     };
 
-    let response = make_request_retry(api_url, &request, client, None).await?;
+    let request_response = make_request_retry(api_url, &request, client, None).await?;
 
-    let response = response
-        .json::<Response<ApiTokens>>()
+    let response_text = request_response
+        .text()
         .await
-        .context("Failed to parse refresh token response")?;
+        .context("Failed to read refresh token response")?;
+
+    let response = serde_json::from_str::<Response<ApiTokens>>(&response_text)
+        .with_context(|| format!("Failed to parse refresh token response: {response_text}"))?;
 
     Ok(response.data)
 }
@@ -200,12 +212,15 @@ pub async fn get_tokens(
         auth: None,
     };
 
-    let response = make_request_retry(api_url, &request, client, None).await?;
+    let request_response = make_request_retry(api_url, &request, client, None).await?;
 
-    let response = response
-        .json::<Response<ApiTokens>>()
+    let response_text = request_response
+        .text()
         .await
-        .context("Failed to parse login response")?;
+        .context("Failed to read login response")?;
+
+    let response = serde_json::from_str::<Response<ApiTokens>>(&response_text)
+        .with_context(|| format!("Failed to parse login response: {response_text}"))?;
 
     Ok(response.data)
 }
