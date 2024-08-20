@@ -1,0 +1,47 @@
+[
+  {
+    "method": "POST",
+    "url": "https://api.url/organizations",
+    "body": {
+      "id": "manual-uuid if needed",
+      "client_id": "client-id",
+      "billing_email": "billing_email@email.com",
+      "billing_address": {
+        "name": "string",
+        "company_name": "string",
+        "address": "string",
+        "city": "string",
+        "country": "string",
+        "country_name": "string",
+        "phone": "string",
+        "vat": "string",
+        "zip": "string"
+      },
+      "consents": {
+        "uuid": true
+      },
+      "sales_channel_id": "sales-channel-id",
+      "shipping_addresses": [
+        {
+          "default": true,
+          "name": "default",
+          "address": {
+            "name": "string",
+            "company_name": "string",
+            "address": "string",
+            "city": "string",
+            "country": "string",
+            "country_name": "string",
+            "phone": "string",
+            "vat": "string",
+            "zip": "string"
+          }
+        }
+      ]
+    },
+    "auth": {
+      "email": "test@example.com",
+      "password": "secret"
+    }
+  }
+]

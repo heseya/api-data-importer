@@ -1,0 +1,16 @@
+[
+  {
+    "method": "POST",
+    "url": "https://api.url/media",
+    "body": {
+      "id": "podajemy manualnie id by wiedzieć co potem dodać potem do produktu"
+    },
+    "auth": {
+      "email": "test@example.com",
+      "password": "secret"
+    },
+    "files": {
+      "file": "https://example.com/image.jpg"
+    }
+  }
+]

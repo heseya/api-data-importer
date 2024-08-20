@@ -1,0 +1,14 @@
+[
+  {
+    "method": "POST",
+    "url": "https://api.url/products",
+    "body": {
+      "id": "podajemy manualnie jeśli chcemy by wiedzieć do czego zpatchować potem seo",
+      "media": ["uuid-media-1"]
+    },
+    "auth": {
+      "email": "test@example.com",
+      "password": "secret"
+    }
+  }
+]

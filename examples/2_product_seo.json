@@ -1,0 +1,17 @@
+[
+  {
+    "method": "PATCH",
+    "url": "https://api.url/products/id:uuid-product-1",
+    "body": {
+      "seo": {
+        "title": "sample title",
+        "description": "description",
+        "og_image_id": "tu pewnie uuid jakiegoś media?"
+      }
+    },
+    "auth": {
+      "email": "test@example.com",
+      "password": "secret"
+    }
+  }
+]
